@@ -1,0 +1,160 @@
+# Persona 데스크톱 앱 빌드·연기 시험·릴리스.
+# 원본은 비공개 저장소 room-19/persona 에 있고, 읽기 전용 배포 키(PERSONA_SOURCE_KEY)로 받는다. 이 저장소에는 설치 파일만 올라간다.
+# 일으키는 법(비공개 저장소 CI 가 배포 키로 태그를 민다):
+#   ci/<커밋 40자>                → 세 러너에서 빌드 + 설치 + 연기 시험(올리지 않음)
+#   rel/<x.y.z>/<커밋 40자>       → 위 + 릴리스 v<x.y.z> 에 설치 파일·업데이트 정보 올림
+name: build
+on:
+  push:
+    tags: ['ci/*', 'rel/*']
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: room-19/persona commit (40 hex)
+        required: true
+      version:
+        description: release version x.y.z (empty = build and test only)
+        required: false
+        default: ''
+permissions:
+  contents: read
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.p.outputs.sha }}
+      version: ${{ steps.p.outputs.version }}
+    steps:
+      - id: p
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+          IN_SHA: ${{ inputs.sha }}
+          IN_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IN_SHA:-}" ]; then sha="$IN_SHA"; version="${IN_VERSION:-}"
+          elif [[ "$REF" =~ ^ci/([0-9a-f]{40})$ ]]; then sha="${BASH_REMATCH[1]}"; version=""
+          elif [[ "$REF" =~ ^rel/([0-9]+\.[0-9]+\.[0-9]+)/([0-9a-f]{40})$ ]]; then version="${BASH_REMATCH[1]}"; sha="${BASH_REMATCH[2]}"
+          else echo "unexpected ref: $REF"; exit 1; fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha"; exit 1; }
+          [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, platform: mac, arch: arm64 }
+          - { os: macos-15-intel, platform: mac, arch: x64 }
+          - { os: windows-latest, platform: win, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: room-19/persona
+          ref: ${{ needs.meta.outputs.sha }}
+          ssh-key: ${{ secrets.PERSONA_SOURCE_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Set release version
+        if: needs.meta.outputs.version != ''
+        run: npm version ${{ needs.meta.outputs.version }} --no-git-tag-version --allow-same-version
+      - name: Model cache path
+        shell: bash
+        run: echo "PERSONA_MODEL_CACHE=${RUNNER_TEMP}/model-cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/model-cache
+          key: model-bge-m3-4de13258303883538bd53b696b452bf8099f0858
+      - name: Fetch model (same downloader as the app, hash-checked)
+        run: node desktop/engine/cli-fetch-model.js "${{ env.PERSONA_MODEL_CACHE }}"
+      - name: Build installer
+        run: npx electron-builder --config electron-builder.config.cjs --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+
+      - name: Install from the dmg (mac)
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mnt="$RUNNER_TEMP/dmg"; mkdir -p "$mnt" "$RUNNER_TEMP/Applications"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "dist/Persona-mac-${{ matrix.arch }}.dmg"
+          cp -R "$mnt/Persona.app" "$RUNNER_TEMP/Applications/"
+          hdiutil detach "$mnt"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Applications/Persona.app"
+          file "$RUNNER_TEMP/Applications/Persona.app/Contents/MacOS/Persona"
+          echo "APP_EXE=$RUNNER_TEMP/Applications/Persona.app/Contents/MacOS/Persona" >> "$GITHUB_ENV"
+      - name: Install with the NSIS installer, silent (windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Persona-win-x64.exe" -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA\Programs" -Recurse -Filter Persona.exe | Select-Object -First 1
+          if (-not $exe) { throw "Persona.exe not installed" }
+          Write-Host "installed: $($exe.FullName)"
+          "APP_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $reg = Get-ItemProperty -Path 'HKCU:\Software\Classes\room19-persona' -ErrorAction SilentlyContinue
+          Write-Host "protocol registered: $([bool]$reg)"
+      - name: Smoke test the installed app (fixture records → scan → rank)
+        run: node desktop/smoke/smoke.js --app "${{ env.APP_EXE }}" --out dist/smoke
+      - name: Unit tests on this OS
+        if: success() || failure()
+        run: npm test
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: persona-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: warn
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml
+            dist/smoke/**
+
+  publish:
+    if: needs.meta.outputs.version != ''
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: room-19/persona
+          ref: ${{ needs.meta.outputs.sha }}
+          ssh-key: ${{ secrets.PERSONA_SOURCE_KEY }}
+          persist-credentials: false
+          sparse-checkout: desktop/release
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Merge mac update info (arm64 + x64)
+        run: |
+          set -euo pipefail
+          npx --yes js-yaml@4.3.2 art/persona-mac-arm64/latest-mac.yml > arm64.json
+          npx --yes js-yaml@4.3.2 art/persona-mac-x64/latest-mac.yml > x64.json
+          node desktop/release/merge-latest-mac.js arm64.json x64.json > latest-mac.yml
+          cat latest-mac.yml
+      - name: Create release v${{ needs.meta.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          SHA: ${{ needs.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          files=(art/persona-mac-arm64/Persona-mac-arm64.dmg art/persona-mac-arm64/Persona-mac-arm64.zip art/persona-mac-arm64/Persona-mac-arm64.zip.blockmap
+                 art/persona-mac-x64/Persona-mac-x64.dmg art/persona-mac-x64/Persona-mac-x64.zip art/persona-mac-x64/Persona-mac-x64.zip.blockmap
+                 art/persona-win-x64/Persona-win-x64.exe art/persona-win-x64/Persona-win-x64.exe.blockmap art/persona-win-x64/latest.yml latest-mac.yml)
+          for f in "${files[@]}"; do test -s "$f" || { echo "missing $f"; exit 1; }; done
+          gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes "Persona desktop app $VERSION (source ${SHA:0:7}). Download: https://room-19.com/download"

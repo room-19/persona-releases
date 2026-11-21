@@ -4,7 +4,7 @@ jobs:
   probe:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [macos-15-intel, macos-13, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - run: node -v && echo ok
+      - run: node -v && node -p "process.arch" && echo ok

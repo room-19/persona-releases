@@ -102,10 +102,15 @@ jobs:
           if (-not $exe) { throw "Persona.exe not installed" }
           Write-Host "installed: $($exe.FullName)"
           "APP_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          $reg = Get-ItemProperty -Path 'HKCU:\Software\Classes\room19-persona' -ErrorAction SilentlyContinue
-          Write-Host "protocol registered: $([bool]$reg)"
       - name: Smoke test the installed app (fixture records → scan → rank)
         run: node desktop/smoke/smoke.js --app "${{ env.APP_EXE }}" --out dist/smoke
+      - name: Deep link protocol registered after first launch (windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $cmd = (Get-ItemProperty -Path 'HKCU:\Software\Classes\room19-persona\shell\open\command' -ErrorAction Stop).'(default)'
+          Write-Host "room19-persona -> $cmd"
+          if ($cmd -notlike "*Persona.exe*") { throw "protocol not registered to the installed app" }
       - name: Unit tests on this OS
         if: success() || failure()
         run: npm test

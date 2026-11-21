@@ -158,6 +158,10 @@ jobs:
           $cmd = (Get-ItemProperty -Path 'HKCU:\Software\Classes\room19-persona\shell\open\command' -ErrorAction Stop).'(default)'
           Write-Host "room19-persona -> $cmd"
           if ($cmd -notlike "*Persona.exe*") { throw "protocol not registered to the installed app" }
+      # 화면 흐름 시험(test/desktop-flow)은 Playwright Chromium 에 실제 화면을 연다. 없으면 그 파일만 건너뛰므로 여기서 받는다.
+      - name: Playwright Chromium for the screen-flow test
+        if: success() || failure()
+        run: npx playwright install chromium
       - name: Unit tests on this OS
         if: success() || failure()
         run: npm test
@@ -220,4 +224,10 @@ jobs:
           # 윈도는 차등 업데이트를 꺼 둬서(nsis.differentialPackage false) .exe.blockmap 이 없다. 있으면 같이 올린다.
           [ -s art/persona-win-x64/Persona-win-x64.exe.blockmap ] && files+=(art/persona-win-x64/Persona-win-x64.exe.blockmap)
           for f in "${files[@]}"; do test -s "$f" || { echo "missing $f"; exit 1; }; done
-          gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes "Persona desktop app $VERSION (source ${SHA:0:7}). Download: https://room-19.com/download"
+          # 릴리스 본문 = 원본 desktop/release/notes/<버전>.md(앱 업데이트 창 17·17b 가 이 목록을 그대로 보인다). 없으면 예전 한 줄.
+          notes="desktop/release/notes/$VERSION.md"
+          if [ -s "$notes" ]; then
+            gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes-file "$notes"
+          else
+            gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes "Persona desktop app $VERSION (source ${SHA:0:7}). Download: https://room-19.com/download"
+          fi

@@ -1,0 +1,10 @@
+name: probe
+on: [workflow_dispatch, push]
+jobs:
+  probe:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: node -v && echo ok

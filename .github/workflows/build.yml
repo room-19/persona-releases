@@ -216,6 +216,8 @@ jobs:
           set -euo pipefail
           files=(art/persona-mac-arm64/Persona-mac-arm64.dmg art/persona-mac-arm64/Persona-mac-arm64.zip art/persona-mac-arm64/Persona-mac-arm64.zip.blockmap
                  art/persona-mac-x64/Persona-mac-x64.dmg art/persona-mac-x64/Persona-mac-x64.zip art/persona-mac-x64/Persona-mac-x64.zip.blockmap
-                 art/persona-win-x64/Persona-win-x64.exe art/persona-win-x64/Persona-win-x64.exe.blockmap art/persona-win-x64/latest.yml latest-mac.yml)
+                 art/persona-win-x64/Persona-win-x64.exe art/persona-win-x64/latest.yml latest-mac.yml)
+          # 윈도는 차등 업데이트를 꺼 둬서(nsis.differentialPackage false) .exe.blockmap 이 없다. 있으면 같이 올린다.
+          [ -s art/persona-win-x64/Persona-win-x64.exe.blockmap ] && files+=(art/persona-win-x64/Persona-win-x64.exe.blockmap)
           for f in "${files[@]}"; do test -s "$f" || { echo "missing $f"; exit 1; }; done
           gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes "Persona desktop app $VERSION (source ${SHA:0:7}). Download: https://room-19.com/download"

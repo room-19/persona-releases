@@ -114,18 +114,26 @@ jobs:
       - name: Unit tests on this OS
         if: success() || failure()
         run: npm test
+      # 설치 파일은 릴리스 빌드에서만 올린다(공개 저장소라 산출물을 누구나 받는다 — PR 마다 미공개 코드가 담긴 설치 파일을 남기지 않게).
       - uses: actions/upload-artifact@v4
-        if: success() || failure()
+        if: needs.meta.outputs.version != ''
         with:
           name: persona-${{ matrix.platform }}-${{ matrix.arch }}
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 7
           path: |
             dist/*.dmg
             dist/*.zip
             dist/*.exe
             dist/*.blockmap
             dist/latest*.yml
-            dist/smoke/**
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: smoke-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: dist/smoke/**
 
   publish:
     if: needs.meta.outputs.version != ''
@@ -144,6 +152,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: art
+          pattern: persona-*
       - name: Merge mac update info (arm64 + x64)
         run: |
           set -euo pipefail

@@ -6,7 +6,7 @@
 name: build
 on:
   push:
-    tags: ['ci/*', 'rel/*']
+    tags: ['ci/*', 'rel/**']  # rel/<x.y.z>/<커밋> 은 두 칸이라 'rel/*' 로는 걸리지 않았다(0.1.0·0.2.0 은 손으로 workflow_dispatch)
   workflow_dispatch:
     inputs:
       sha:

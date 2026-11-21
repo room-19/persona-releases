@@ -41,6 +41,28 @@ jobs:
           [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # 릴리스(서명·게시)는 비공개 저장소 main 에 들어간 커밋만, 그리고 그 커밋의 package.json 버전과 같을 때만.
+      # 이 저장소 쓰기 권한이나 태그 키가 새도 리뷰 안 된 커밋을 공식 판으로 내지 못하게 한다.
+      - name: Release must be a commit on room-19/persona main with that version
+        if: steps.p.outputs.version != ''
+        shell: bash
+        env:
+          KEY: ${{ secrets.PERSONA_SOURCE_KEY }}
+          SHA: ${{ steps.p.outputs.sha }}
+          VERSION: ${{ steps.p.outputs.version }}
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          printf '%s\n' "$KEY" > "$d/key"; chmod 600 "$d/key"
+          printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n' > "$d/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $d/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$d/known_hosts -o StrictHostKeyChecking=yes"
+          git init -q "$d/r" && cd "$d/r"
+          git remote add origin git@github.com:room-19/persona.git
+          git fetch -q --filter=blob:none origin main
+          git merge-base --is-ancestor "$SHA" FETCH_HEAD || { echo "$SHA is not on room-19/persona main"; exit 1; }
+          v="$(git show "$SHA:package.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          [ "$v" = "$VERSION" ] || { echo "package.json at $SHA says $v, not $VERSION"; exit 1; }
+          echo "ok: $SHA is on main, version $VERSION"
 
   build:
     needs: meta

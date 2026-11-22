@@ -139,6 +139,15 @@ jobs:
           codesign --verify --deep --strict "$RUNNER_TEMP/Applications/Persona.app"
           file "$RUNNER_TEMP/Applications/Persona.app/Contents/MacOS/Persona"
           echo "APP_EXE=$RUNNER_TEMP/Applications/Persona.app/Contents/MacOS/Persona" >> "$GITHUB_ENV"
+      # 릴리스 맥 빌드: Developer ID 서명·공증·스테이플을 dmg·앱·안쪽 .node/.dylib/.wasm 까지 확인한다(원본 desktop/release/verify-mac.js).
+      # codesign --verify --deep --strict · spctl -a -vv(source=Notarized Developer ID) · xcrun stapler validate 출력을 그대로 남기고, 어긋나면 릴리스를 멈춘다.
+      - name: Verify Developer ID signature, notarization and staple (mac release)
+        if: matrix.platform == 'mac' && needs.meta.outputs.version != ''
+        run: |
+          # 호스트 러너는 Gatekeeper 가 꺼져 있을 수 있다(그러면 spctl 이 'source=assessments disabled'). 켜고 상태를 남긴다.
+          sudo spctl --master-enable || true
+          spctl --status
+          node desktop/release/verify-mac.js "dist/Persona-mac-${{ matrix.arch }}.dmg" --team 786QAQM4PL
       - name: Install with the NSIS installer, silent (windows)
         if: matrix.platform == 'win'
         shell: pwsh

@@ -3,6 +3,10 @@
 # 일으키는 법(비공개 저장소 CI 가 배포 키로 태그를 민다):
 #   ci/<커밋 40자>                → 세 러너에서 빌드 + 설치 + 연기 시험(올리지 않음)
 #   rel/<x.y.z>/<커밋 40자>       → 위 + 릴리스 v<x.y.z> 에 설치 파일·업데이트 정보 올림
+# 시험 빌드(손으로 workflow_dispatch, preview 입력 = 0.9.0-preview.1 같은 판 번호):
+#   세 러너에서 빌드 + 설치 + 연기 시험 → 미리 보기 릴리스 preview-<판 번호> 에 설치 파일 셋만 올린다(업데이트 정보 latest*.yml 은 올리지 않는다).
+#   미리 보기 릴리스는 '최신 릴리스'가 아니라서 room-19.com/download 와 깔린 앱의 자동 업데이트는 그대로다. 서명 시크릿은 주지 않는다.
+# 운영 릴리스는 원본에 desktop/release/RELEASE_LOCK 이 있는 동안 나가지 않는다(9판 배포 잠금).
 name: build
 on:
   push:
@@ -16,6 +20,10 @@ on:
         description: release version x.y.z (empty = build and test only)
         required: false
         default: ''
+      preview:
+        description: preview build version x.y.z-preview.n (empty = none). Publishes a pre-release preview-<version>; never together with version
+        required: false
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -24,6 +32,7 @@ jobs:
     outputs:
       sha: ${{ steps.p.outputs.sha }}
       version: ${{ steps.p.outputs.version }}
+      preview: ${{ steps.p.outputs.preview }}
     steps:
       - id: p
         shell: bash
@@ -31,16 +40,21 @@ jobs:
           REF: ${{ github.ref_name }}
           IN_SHA: ${{ inputs.sha }}
           IN_VERSION: ${{ inputs.version }}
+          IN_PREVIEW: ${{ inputs.preview }}
         run: |
           set -euo pipefail
-          if [ -n "${IN_SHA:-}" ]; then sha="$IN_SHA"; version="${IN_VERSION:-}"
+          preview=""
+          if [ -n "${IN_SHA:-}" ]; then sha="$IN_SHA"; version="${IN_VERSION:-}"; preview="${IN_PREVIEW:-}"
           elif [[ "$REF" =~ ^ci/([0-9a-f]{40})$ ]]; then sha="${BASH_REMATCH[1]}"; version=""
           elif [[ "$REF" =~ ^rel/([0-9]+\.[0-9]+\.[0-9]+)/([0-9a-f]{40})$ ]]; then version="${BASH_REMATCH[1]}"; sha="${BASH_REMATCH[2]}"
           else echo "unexpected ref: $REF"; exit 1; fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha"; exit 1; }
           [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version"; exit 1; }
+          [[ -z "$preview" || "$preview" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]] || { echo "bad preview version"; exit 1; }
+          [[ -z "$version" || -z "$preview" ]] || { echo "version and preview cannot go together"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "preview=$preview" >> "$GITHUB_OUTPUT"
       # 릴리스(서명·게시)는 비공개 저장소 main 에 들어간 커밋만, 그리고 그 커밋의 package.json 버전과 같을 때만.
       # 이 저장소 쓰기 권한이나 태그 키가 새도 리뷰 안 된 커밋을 공식 판으로 내지 못하게 한다.
       - name: Release must be a commit on room-19/persona main with that version
@@ -62,6 +76,8 @@ jobs:
           git merge-base --is-ancestor "$SHA" FETCH_HEAD || { echo "$SHA is not on room-19/persona main"; exit 1; }
           v="$(git show "$SHA:package.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
           [ "$v" = "$VERSION" ] || { echo "package.json at $SHA says $v, not $VERSION"; exit 1; }
+          # 9판 배포 잠금: 원본에 이 파일이 있는 동안에는 운영 릴리스를 내지 않는다(신고번호·서명·공증 전). 푸는 법은 그 파일 안에.
+          if [ -n "$(git ls-tree "$SHA" desktop/release/RELEASE_LOCK)" ]; then echo "release locked: desktop/release/RELEASE_LOCK exists at $SHA"; exit 1; fi
           echo "ok: $SHA is on main, version $VERSION"
 
   build:
@@ -105,6 +121,7 @@ jobs:
         shell: bash
         env:
           RELEASE: ${{ needs.meta.outputs.version != '' }}
+          PREVIEW: ${{ needs.meta.outputs.preview }}
           PLATFORM: ${{ matrix.platform }}
           ARCH: ${{ matrix.arch }}
           MAC_CSC_LINK: ${{ matrix.platform == 'mac' && needs.meta.outputs.version != '' && secrets.MAC_CSC_LINK || '' }}
@@ -125,6 +142,8 @@ jobs:
           fi
           if [ -n "$WIN_LINK" ]; then export WIN_CSC_LINK="$WIN_LINK" WIN_CSC_KEY_PASSWORD="$WIN_PASS"; fi
           unset MAC_CSC_LINK MAC_CSC_KEY_PASSWORD P8 P8_ID P8_ISSUER WIN_LINK WIN_PASS
+          # 시험 빌드: 서버는 따로 선 주소, 업데이트는 묻지 않음, 판 번호는 입력값(원본 electron-builder.config.cjs 가 읽는다)
+          if [ -n "$PREVIEW" ]; then export PERSONA_CHANNEL=preview PERSONA_VERSION="$PREVIEW"; fi
           npx electron-builder --config electron-builder.config.cjs "--$PLATFORM" "--$ARCH" --publish never
 
       - name: Install from the dmg (mac)
@@ -174,9 +193,9 @@ jobs:
       - name: Unit tests on this OS
         if: success() || failure()
         run: npm test
-      # 설치 파일은 릴리스 빌드에서만 올린다(공개 저장소라 산출물을 누구나 받는다 — PR 마다 미공개 코드가 담긴 설치 파일을 남기지 않게).
+      # 설치 파일은 릴리스·시험 빌드에서만 올린다(공개 저장소라 산출물을 누구나 받는다 — PR 마다 미공개 코드가 담긴 설치 파일을 남기지 않게).
       - uses: actions/upload-artifact@v4
-        if: needs.meta.outputs.version != ''
+        if: needs.meta.outputs.version != '' || needs.meta.outputs.preview != ''
         with:
           name: persona-${{ matrix.platform }}-${{ matrix.arch }}
           if-no-files-found: error
@@ -240,3 +259,45 @@ jobs:
           else
             gh release create "v$VERSION" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --title "Persona $VERSION" --notes "Persona desktop app $VERSION (source ${SHA:0:7}). Download: https://room-19.com/download"
           fi
+
+  # 시험 빌드: 미리 보기 릴리스 preview-<판 번호>. 설치 파일 셋만 올린다 — 업데이트 정보(latest*.yml)가 없으니 어떤 앱도 이 릴리스로 업데이트되지 않는다.
+  preview:
+    if: needs.meta.outputs.preview != ''
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+          pattern: persona-*
+      - name: Publish pre-release preview-${{ needs.meta.outputs.preview }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW: ${{ needs.meta.outputs.preview }}
+          SHA: ${{ needs.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          files=(art/persona-mac-arm64/Persona-mac-arm64.dmg art/persona-mac-x64/Persona-mac-x64.dmg art/persona-win-x64/Persona-win-x64.exe)
+          for f in "${files[@]}"; do test -s "$f" || { echo "missing $f"; exit 1; }; done
+          tag="preview-$PREVIEW"
+          {
+            echo "페르소나 $PREVIEW — 시험 빌드(운영 판이 아니다). 원본 커밋 ${SHA:0:7}."
+            echo
+            echo "빌드 해시(sha256):"
+            echo '```'
+            (cd art && sha256sum persona-mac-arm64/Persona-mac-arm64.dmg persona-mac-x64/Persona-mac-x64.dmg persona-win-x64/Persona-win-x64.exe | sed 's#  persona-[a-z0-9-]*/#  #')
+            echo '```'
+          } > notes.md
+          cat notes.md
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --notes-file notes.md
+          else
+            gh release create "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --prerelease --latest=false --title "Persona $PREVIEW (preview)" --notes-file notes.md
+          fi
+          # 운영 판은 그대로여야 한다
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          echo "latest release is still $latest"
+          [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the latest release must be a v<x.y.z> release"; exit 1; }

@@ -297,7 +297,15 @@ jobs:
           else
             gh release create "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main --prerelease --latest=false --title "Persona $PREVIEW (preview)" --notes-file notes.md
           fi
-          # 운영 판은 그대로여야 한다
-          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
-          echo "latest release is still $latest"
-          [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the latest release must be a v<x.y.z> release"; exit 1; }
+          # 이 판은 미리 보기로만 남아야 한다(운영 latest 가 되면 안 된다)
+          [ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = true ] || { echo "$tag must stay a pre-release"; exit 1; }
+          # 운영 판은 그대로여야 한다. 운영 릴리스가 하나도 없으면(11-24 옛 릴리스 · 태그를 모두 지움) GitHub 의 latest 는 404 — 그것도 '그대로'다.
+          # 404 만 '없음'으로 읽는다(403 · 요청 제한 · 500 은 실패).
+          if latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>latest.err)"; then
+            echo "latest release is still $latest"
+            [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the latest release must be a v<x.y.z> release"; exit 1; }
+          elif grep -q 'HTTP 404' latest.err; then
+            echo "no production release (latest is 404) — unchanged"
+          else
+            cat latest.err; exit 1
+          fi
